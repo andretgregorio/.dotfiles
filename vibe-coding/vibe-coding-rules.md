@@ -1,5 +1,7 @@
 # Development Guidelines for Vibe Coding
 
+This file is actualy a copy + paste from [Development Guidelines for Claude](https://github.com/citypaul/.dotfiles/blob/main/claude/.claude/CLAUDE.md) written by Paul Hammond.
+
 ## Core Philosophy
 
 **TEST-DRIVEN DEVELOPMENT IS NON-NEGOTIABLE.** Every single line of production code must be written in response to a failing test. No exceptions. This is not a suggestion or a preference - it is the fundamental practice that enables all other principles in this document.
