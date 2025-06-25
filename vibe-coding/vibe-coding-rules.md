@@ -1,4 +1,4 @@
-# Development Guidelines for Claude
+# Development Guidelines for Vibe Coding
 
 ## Core Philosophy
 
@@ -1069,7 +1069,7 @@ const applyDiscount = (price: number, discountRate: number): number => {
 - PRs should be focused on a single feature or fix
 - Include description of the behavior change, not implementation details
 
-## Working with Claude
+## Working with generative AIs
 
 ### Expectations
 
