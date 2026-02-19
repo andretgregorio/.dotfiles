@@ -14,15 +14,16 @@
 #   - delta (beautiful git diffs)
 #   - Claude Code CLI (native installer)
 #   - Claude Desktop (unofficial .deb via community repo)
-#   - Cursor IDE + CLI (AppImage-based)
+#   - Cursor IDE (.deb) + Cursor CLI
 #   - HTTPie
 #   - DBeaver Community Edition
 #   - RedisInsight (via Snap)
 #   - GitHub CLI (gh)
 #   - jq
+#   - Terminator (terminal emulator, configured with ZSH + Powerlevel10k)
 # =============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 # --- Colors & helpers --------------------------------------------------------
 RED='\033[0;31m'
@@ -43,6 +44,20 @@ step_header() {
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 }
 
+# --- Step runner: executes a named function and continues on failure ----------
+FAILED_STEPS=()
+run_step() {
+    local name="$1"
+    local fn="$2"
+    step_header "$name"
+    if ( set -eo pipefail; "$fn" ); then
+        :
+    else
+        warn "Step '$name' failed — continuing. Check output above for details."
+        FAILED_STEPS+=("$name")
+    fi
+}
+
 # --- Pre-flight checks -------------------------------------------------------
 if [[ "$(lsb_release -rs 2>/dev/null || echo 'unknown')" != "24.04" ]]; then
     warn "This script is designed for Ubuntu 24.04. Detected: $(lsb_release -ds 2>/dev/null || echo 'unknown')."
@@ -58,84 +73,138 @@ fi
 ORIGINAL_USER="$USER"
 ORIGINAL_HOME="$HOME"
 
-step_header "Updating system packages"
-sudo apt-get update -y
-sudo apt-get upgrade -y
-success "System packages updated"
+# =============================================================================
+# System update
+# =============================================================================
+update_system() {
+    sudo apt-get update -y
+    sudo apt-get upgrade -y
+    success "System packages updated"
+}
+run_step "Updating system packages" update_system
 
 # =============================================================================
 # 0. curl (required by many subsequent install steps)
 # =============================================================================
-step_header "Installing curl"
-if command -v curl &>/dev/null; then
-    success "curl is already installed"
-else
-    sudo apt-get install -y curl
-    success "curl installed"
-fi
+install_curl() {
+    if command -v curl &>/dev/null; then
+        success "curl is already installed"
+    else
+        sudo apt-get install -y curl
+        success "curl installed"
+    fi
+}
+run_step "0. curl" install_curl
 
 # =============================================================================
 # 1. zsh
 # =============================================================================
-step_header "Installing zsh"
-if command -v zsh &>/dev/null; then
-    success "zsh is already installed ($(zsh --version))"
-else
-    sudo apt-get install -y zsh
-    success "zsh installed"
-fi
+install_zsh() {
+    if command -v zsh &>/dev/null; then
+        success "zsh is already installed ($(zsh --version))"
+    else
+        sudo apt-get install -y zsh
+        success "zsh installed"
+    fi
+}
+run_step "1. zsh" install_zsh
 
 # =============================================================================
 # 2. Oh My Zsh
 # =============================================================================
-step_header "Installing Oh My Zsh"
-if [[ -d "$ORIGINAL_HOME/.oh-my-zsh" ]]; then
-    success "Oh My Zsh is already installed"
-else
-    # Unattended install, don't switch shell yet
-    RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-    success "Oh My Zsh installed"
-fi
+install_ohmyzsh() {
+    if [[ -d "$ORIGINAL_HOME/.oh-my-zsh" ]]; then
+        success "Oh My Zsh is already installed"
+    else
+        # Unattended install, don't switch shell yet
+        RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+        success "Oh My Zsh installed"
+    fi
+}
+run_step "2. Oh My Zsh" install_ohmyzsh
 
 # =============================================================================
 # 3. Powerlevel10k
 # =============================================================================
-step_header "Installing Powerlevel10k theme"
-P10K_DIR="${ZSH_CUSTOM:-$ORIGINAL_HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
-if [[ -d "$P10K_DIR" ]]; then
-    success "Powerlevel10k is already installed"
-else
-    git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$P10K_DIR"
-    # Set theme in .zshrc
-    if grep -q '^ZSH_THEME=' "$ORIGINAL_HOME/.zshrc" 2>/dev/null; then
-        sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' "$ORIGINAL_HOME/.zshrc"
+install_p10k() {
+    local p10k_dir="${ZSH_CUSTOM:-$ORIGINAL_HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
+    if [[ -d "$p10k_dir" ]]; then
+        success "Powerlevel10k is already installed"
+    else
+        git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$p10k_dir"
+        success "Powerlevel10k installed"
     fi
-    success "Powerlevel10k installed and configured in .zshrc"
-fi
+    info "Tip: Install a Nerd Font (e.g., MesloLGS NF) for proper Powerlevel10k rendering."
+    info "  Download from: https://github.com/romkatv/powerlevel10k#fonts"
+}
+run_step "3. Powerlevel10k" install_p10k
 
-info "Tip: Install a Nerd Font (e.g., MesloLGS NF) for proper Powerlevel10k rendering."
-info "  Download from: https://github.com/romkatv/powerlevel10k#fonts"
+# =============================================================================
+# 3.5. Configure ZSH (.zshrc)
+# =============================================================================
+configure_zsh() {
+    local zshrc="$ORIGINAL_HOME/.zshrc"
+
+    if [[ ! -f "$zshrc" ]]; then
+        warn ".zshrc not found — Oh My Zsh may not have been installed. Skipping ZSH configuration."
+        return 1
+    fi
+
+    # Set Powerlevel10k theme
+    if grep -q '^ZSH_THEME=' "$zshrc"; then
+        sed -i 's|^ZSH_THEME=.*|ZSH_THEME="powerlevel10k/powerlevel10k"|' "$zshrc"
+        success "ZSH_THEME set to powerlevel10k/powerlevel10k"
+    fi
+
+    # Set default plugins
+    if grep -q '^plugins=' "$zshrc"; then
+        sed -i 's|^plugins=.*|plugins=(git docker)|' "$zshrc"
+        success "ZSH plugins configured: git docker"
+    fi
+
+    # Add nvm sourcing if not already present
+    if ! grep -q 'NVM_DIR' "$zshrc"; then
+        cat >> "$zshrc" << 'ZSHEOF'
+
+# nvm (Node Version Manager)
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"
+ZSHEOF
+        success "nvm configuration added to .zshrc"
+    else
+        success "nvm configuration already present in .zshrc"
+    fi
+
+    # Add ~/.local/bin to PATH if not already present
+    if ! grep -q '\.local/bin' "$zshrc"; then
+        echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$zshrc"
+        success "~/.local/bin added to PATH in .zshrc"
+    fi
+
+    success "ZSH configured"
+}
+run_step "3.5. Configure ZSH (.zshrc)" configure_zsh
 
 # =============================================================================
 # 4. nvm (Node Version Manager)
 # =============================================================================
-step_header "Installing nvm"
-export NVM_DIR="$ORIGINAL_HOME/.nvm"
-if [[ -d "$NVM_DIR" ]]; then
-    success "nvm is already installed"
-else
-    curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-    success "nvm installed"
-fi
+install_nvm() {
+    if [[ -d "$ORIGINAL_HOME/.nvm" ]]; then
+        success "nvm is already installed"
+    else
+        curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+        success "nvm installed"
+    fi
+}
+run_step "4. nvm" install_nvm
 
-# Load nvm for this session
-# nvm.sh uses variables that may be unset, so we must disable nounset temporarily
+# Load nvm in the current shell session (must run in main shell, not subshell)
 export NVM_DIR="$ORIGINAL_HOME/.nvm"
 set +u
 # shellcheck disable=SC1091
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
-# Install latest LTS Node.js
 if command -v nvm &>/dev/null; then
     info "Installing latest Node.js LTS via nvm..."
     nvm install --lts
@@ -151,278 +220,316 @@ set -u
 # =============================================================================
 # 5. Docker (Docker Engine + Compose plugin)
 # =============================================================================
-step_header "Installing Docker"
-if command -v docker &>/dev/null; then
-    success "Docker is already installed ($(docker --version))"
-else
-    # Remove any old/conflicting packages
-    for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
-        sudo apt-get remove -y "$pkg" 2>/dev/null || true
-    done
+install_docker() {
+    if ! command -v docker &>/dev/null; then
+        # Remove any old/conflicting packages
+        for pkg in docker.io docker-doc docker-compose docker-compose-v2 podman-docker containerd runc; do
+            sudo apt-get remove -y "$pkg" 2>/dev/null || true
+        done
 
-    # Add Docker's official GPG key and repo
-    sudo apt-get install -y ca-certificates curl
-    sudo install -m 0755 -d /etc/apt/keyrings
-    sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-    sudo chmod a+r /etc/apt/keyrings/docker.asc
+        # Add Docker's official GPG key and repo
+        sudo apt-get install -y ca-certificates curl
+        sudo install -m 0755 -d /etc/apt/keyrings
+        sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+        sudo chmod a+r /etc/apt/keyrings/docker.asc
 
-    echo \
-      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
-      $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
-      sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+        echo \
+          "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+          $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}") stable" | \
+          sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-    sudo apt-get update -y
-    sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+        sudo apt-get update -y
+        sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-    # Add current user to docker group (avoids sudo for docker commands)
-    sudo usermod -aG docker "$ORIGINAL_USER"
+        success "Docker installed ($(docker --version))"
+    else
+        success "Docker is already installed ($(docker --version))"
+    fi
 
-    success "Docker installed ($(docker --version))"
-    warn "Log out and back in (or run 'newgrp docker') for group changes to take effect."
-fi
+    # Always ensure the current user is in the docker group
+    if ! groups "$ORIGINAL_USER" | grep -qw docker; then
+        sudo usermod -aG docker "$ORIGINAL_USER"
+        warn "User '$ORIGINAL_USER' added to docker group. Log out and back in (or run 'newgrp docker') for this to take effect."
+    else
+        success "User '$ORIGINAL_USER' is already in the docker group"
+    fi
+}
+run_step "5. Docker" install_docker
 
 # =============================================================================
 # 6. vim
 # =============================================================================
-step_header "Installing vim"
-if command -v vim &>/dev/null; then
-    success "vim is already installed"
-else
-    sudo apt-get install -y vim
-    success "vim installed"
-fi
+install_vim() {
+    if command -v vim &>/dev/null; then
+        success "vim is already installed"
+    else
+        sudo apt-get install -y vim
+        success "vim installed"
+    fi
+}
+run_step "6. vim" install_vim
 
 # =============================================================================
 # 7. build-essential
 # =============================================================================
-step_header "Installing build-essential"
-if dpkg -s build-essential &>/dev/null 2>&1; then
-    success "build-essential is already installed"
-else
-    sudo apt-get install -y build-essential
-    success "build-essential installed"
-fi
+install_build_essential() {
+    if dpkg -s build-essential &>/dev/null 2>&1; then
+        success "build-essential is already installed"
+    else
+        sudo apt-get install -y build-essential
+        success "build-essential installed"
+    fi
+}
+run_step "7. build-essential" install_build_essential
 
 # =============================================================================
 # 8. delta (beautiful git diffs)
 # =============================================================================
-step_header "Installing git-delta (beautiful git diffs)"
-if command -v delta &>/dev/null; then
-    success "delta is already installed ($(delta --version))"
-else
-    sudo apt-get install -y git-delta 2>/dev/null || {
-        # Fallback: download .deb from GitHub releases
-        info "git-delta not in apt, downloading from GitHub releases..."
-        DELTA_VERSION="0.18.2"
-        DELTA_DEB="git-delta_${DELTA_VERSION}_amd64.deb"
-        curl -fsSL -o "/tmp/${DELTA_DEB}" \
-            "https://github.com/dandavison/delta/releases/download/${DELTA_VERSION}/${DELTA_DEB}"
-        sudo dpkg -i "/tmp/${DELTA_DEB}" || sudo apt-get install -f -y
-        rm -f "/tmp/${DELTA_DEB}"
-    }
-    success "delta installed"
-fi
+install_delta() {
+    if ! command -v delta &>/dev/null; then
+        sudo apt-get install -y git-delta 2>/dev/null || {
+            # Fallback: download .deb from GitHub releases
+            info "git-delta not in apt, downloading from GitHub releases..."
+            local delta_version="0.18.2"
+            local delta_deb="git-delta_${delta_version}_amd64.deb"
+            curl -fsSL -o "/tmp/${delta_deb}" \
+                "https://github.com/dandavison/delta/releases/download/${delta_version}/${delta_deb}"
+            sudo dpkg -i "/tmp/${delta_deb}" || sudo apt-get install -f -y
+            rm -f "/tmp/${delta_deb}"
+        }
+        success "delta installed"
+    else
+        success "delta is already installed ($(delta --version))"
+    fi
 
-# Configure git to use delta
-info "Configuring git to use delta as the pager..."
-git config --global core.pager delta
-git config --global interactive.diffFilter "delta --color-only"
-git config --global delta.navigate true
-git config --global delta.side-by-side true
-git config --global delta.line-numbers true
-git config --global delta.syntax-theme "Dracula"
-git config --global merge.conflictstyle diff3
-git config --global diff.colorMoved default
-success "git configured to use delta with side-by-side diffs"
+    info "Configuring git to use delta..."
+    git config --global core.pager delta
+    git config --global interactive.diffFilter "delta --color-only"
+    git config --global delta.navigate true
+    git config --global delta.side-by-side true
+    git config --global delta.line-numbers true
+    git config --global delta.syntax-theme "Dracula"
+    git config --global merge.conflictstyle diff3
+    git config --global diff.colorMoved default
+    success "git configured to use delta with side-by-side diffs"
+}
+run_step "8. delta (git diffs)" install_delta
 
 # =============================================================================
 # 9. Claude Code CLI (native installer)
 # =============================================================================
-step_header "Installing Claude Code CLI"
-if command -v claude &>/dev/null; then
-    success "Claude Code is already installed ($(claude --version 2>/dev/null || echo 'installed'))"
-else
-    info "Installing via native installer (recommended by Anthropic)..."
-    curl -fsSL https://claude.ai/install.sh | bash
-    success "Claude Code CLI installed"
-    info "Run 'claude' to authenticate and get started."
-fi
+install_claude_code() {
+    if command -v claude &>/dev/null; then
+        success "Claude Code is already installed ($(claude --version 2>/dev/null || echo 'installed'))"
+    else
+        info "Installing via native installer (recommended by Anthropic)..."
+        curl -fsSL https://claude.ai/install.sh | bash
+        success "Claude Code CLI installed"
+        info "Run 'claude' to authenticate and get started."
+    fi
+}
+run_step "9. Claude Code CLI" install_claude_code
 
 # =============================================================================
 # 10. Claude Desktop (unofficial community build for Linux)
 # =============================================================================
-step_header "Installing Claude Desktop (community .deb package)"
-if command -v claude-desktop &>/dev/null || dpkg -s claude-desktop &>/dev/null 2>&1; then
-    success "Claude Desktop is already installed"
-else
-    info "Adding aaddrick/claude-desktop-debian community repository..."
-    curl -fsSL https://aaddrick.github.io/claude-desktop-debian/KEY.gpg \
-        | sudo gpg --dearmor -o /usr/share/keyrings/claude-desktop.gpg
-    echo "deb [signed-by=/usr/share/keyrings/claude-desktop.gpg arch=amd64,arm64] https://aaddrick.github.io/claude-desktop-debian stable main" \
-        | sudo tee /etc/apt/sources.list.d/claude-desktop.list > /dev/null
-    sudo apt-get update -y
-    sudo apt-get install -y claude-desktop
-    success "Claude Desktop installed"
-    warn "Note: This is an unofficial community build, not an official Anthropic product."
-fi
+install_claude_desktop() {
+    if command -v claude-desktop &>/dev/null || dpkg -s claude-desktop &>/dev/null 2>&1; then
+        success "Claude Desktop is already installed"
+    else
+        info "Adding aaddrick/claude-desktop-debian community repository..."
+        curl -fsSL https://aaddrick.github.io/claude-desktop-debian/KEY.gpg \
+            | sudo gpg --dearmor -o /usr/share/keyrings/claude-desktop.gpg
+        echo "deb [signed-by=/usr/share/keyrings/claude-desktop.gpg arch=amd64,arm64] https://aaddrick.github.io/claude-desktop-debian stable main" \
+            | sudo tee /etc/apt/sources.list.d/claude-desktop.list > /dev/null
+        sudo apt-get update -y
+        sudo apt-get install -y claude-desktop
+        success "Claude Desktop installed"
+        warn "Note: This is an unofficial community build, not an official Anthropic product."
+    fi
+}
+run_step "10. Claude Desktop" install_claude_desktop
 
 # =============================================================================
-# 11. Cursor IDE + CLI (AppImage)
+# 11. Cursor IDE (.deb) + Cursor CLI
 # =============================================================================
-step_header "Installing Cursor IDE"
-CURSOR_DIR="$ORIGINAL_HOME/.local/bin/cursor"
-CURSOR_APPIMAGE="$CURSOR_DIR/cursor.AppImage"
-
-if [[ -f "$CURSOR_APPIMAGE" ]] || command -v cursor &>/dev/null; then
-    success "Cursor IDE is already installed"
-else
-    info "Downloading Cursor AppImage..."
-    mkdir -p "$CURSOR_DIR"
-    curl -fsSL "https://downloader.cursor.sh/linux/appImage/x64" -o "$CURSOR_APPIMAGE"
-    chmod +x "$CURSOR_APPIMAGE"
-
-    # Extract AppImage for better desktop integration (avoids FUSE issues on 24.04)
-    info "Extracting AppImage for native integration..."
-    cd "$CURSOR_DIR"
-    "$CURSOR_APPIMAGE" --appimage-extract 2>/dev/null || true
-    if [[ -d "$CURSOR_DIR/squashfs-root" ]]; then
-        # Move extracted content and clean up
-        mv squashfs-root/* . 2>/dev/null || true
-        rm -rf squashfs-root "$CURSOR_APPIMAGE"
-
-        # Fix Chrome sandbox permissions
-        if [[ -f "$CURSOR_DIR/chrome-sandbox" ]]; then
-            sudo chown root:root "$CURSOR_DIR/chrome-sandbox"
-            sudo chmod 4755 "$CURSOR_DIR/chrome-sandbox"
-        fi
-    fi
-    cd - >/dev/null
-
-    # Create desktop entry
-    mkdir -p "$ORIGINAL_HOME/.local/share/applications"
-    CURSOR_ICON="$CURSOR_DIR/resources/app/resources/linux/code.png"
-    CURSOR_EXEC="$CURSOR_DIR/cursor"
-    if [[ -f "$CURSOR_APPIMAGE" ]]; then
-        CURSOR_EXEC="$CURSOR_APPIMAGE --no-sandbox"
+install_cursor() {
+    # Install Cursor IDE via .deb
+    if command -v cursor &>/dev/null || dpkg -l 'cursor' 2>/dev/null | grep -q '^ii'; then
+        success "Cursor IDE is already installed"
+    else
+        info "Downloading Cursor IDE .deb package..."
+        local cursor_deb="/tmp/cursor.deb"
+        curl -fsSL -o "$cursor_deb" "https://api2.cursor.sh/updates/download/golden/linux-x64-deb/cursor/2.5"
+        sudo dpkg -i "$cursor_deb" || sudo apt-get install -f -y
+        rm -f "$cursor_deb"
+        success "Cursor IDE installed"
     fi
 
-    cat > "$ORIGINAL_HOME/.local/share/applications/cursor.desktop" << EOF
-[Desktop Entry]
-Name=Cursor AI IDE
-Comment=AI-powered code editor
-Exec=$CURSOR_EXEC %U
-Icon=$CURSOR_ICON
-Type=Application
-Categories=Development;IDE;
-Terminal=false
-StartupWMClass=cursor
-EOF
+    # Install Cursor CLI
+    info "Installing Cursor CLI..."
+    curl https://cursor.com/install -fsS | bash
+    success "Cursor CLI installed"
+}
+run_step "11. Cursor IDE + CLI" install_cursor
 
-    # Create CLI symlink
-    mkdir -p "$ORIGINAL_HOME/.local/bin"
-    if [[ -f "$CURSOR_DIR/cursor" ]]; then
-        ln -sf "$CURSOR_DIR/cursor" "$ORIGINAL_HOME/.local/bin/cursor"
-    elif [[ -f "$CURSOR_APPIMAGE" ]]; then
-        cat > "$ORIGINAL_HOME/.local/bin/cursor" << 'WRAPPER'
-#!/usr/bin/env bash
-exec "$HOME/.local/bin/cursor/cursor.AppImage" --no-sandbox "$@"
-WRAPPER
-        chmod +x "$ORIGINAL_HOME/.local/bin/cursor"
-    fi
-
-    success "Cursor IDE installed"
-    info "Launch from app menu or run 'cursor' in the terminal."
-fi
-
-# Ensure ~/.local/bin is in PATH
+# Ensure ~/.local/bin is in the current session's PATH
 if ! echo "$PATH" | grep -q "$ORIGINAL_HOME/.local/bin"; then
-    for rc_file in "$ORIGINAL_HOME/.bashrc" "$ORIGINAL_HOME/.zshrc"; do
-        if [[ -f "$rc_file" ]] && ! grep -q '\.local/bin' "$rc_file"; then
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$rc_file"
-        fi
-    done
     export PATH="$ORIGINAL_HOME/.local/bin:$PATH"
 fi
 
 # =============================================================================
 # 12. HTTPie
 # =============================================================================
-step_header "Installing HTTPie"
-if command -v http &>/dev/null; then
-    success "HTTPie is already installed ($(http --version 2>/dev/null | head -1))"
-else
-    sudo apt-get install -y httpie
-    success "HTTPie installed"
-fi
+install_httpie() {
+    if command -v http &>/dev/null; then
+        success "HTTPie is already installed ($(http --version 2>/dev/null | head -1))"
+    else
+        sudo apt-get install -y httpie
+        success "HTTPie installed"
+    fi
+}
+run_step "12. HTTPie" install_httpie
 
 # =============================================================================
 # 13. DBeaver Community Edition
 # =============================================================================
-step_header "Installing DBeaver Community Edition"
-if command -v dbeaver &>/dev/null || dpkg -s dbeaver-ce &>/dev/null 2>&1; then
-    success "DBeaver is already installed"
-else
-    info "Adding DBeaver PPA repository..."
-    sudo add-apt-repository -y ppa:serge-rider/dbeaver-ce
-    sudo apt-get update -y
-    sudo apt-get install -y dbeaver-ce
-    success "DBeaver Community Edition installed"
-fi
+install_dbeaver() {
+    if command -v dbeaver &>/dev/null || dpkg -s dbeaver-ce &>/dev/null 2>&1; then
+        success "DBeaver is already installed"
+    else
+        info "Adding DBeaver PPA repository..."
+        sudo add-apt-repository -y ppa:serge-rider/dbeaver-ce
+        sudo apt-get update -y
+        sudo apt-get install -y dbeaver-ce
+        success "DBeaver Community Edition installed"
+    fi
+}
+run_step "13. DBeaver" install_dbeaver
 
 # =============================================================================
 # 14. RedisInsight (via Snap)
 # =============================================================================
-step_header "Installing RedisInsight"
-if snap list redisinsight &>/dev/null 2>&1; then
-    success "RedisInsight is already installed"
-else
-    info "Installing RedisInsight via Snap..."
-    sudo snap install redisinsight
-    success "RedisInsight installed"
-    info "Optional: run 'snap connect redisinsight:password-manager-service' for encrypted credential storage."
-fi
+install_redisinsight() {
+    if snap list redisinsight &>/dev/null 2>&1; then
+        success "RedisInsight is already installed"
+    else
+        info "Installing RedisInsight via Snap..."
+        sudo snap install redisinsight
+        success "RedisInsight installed"
+        info "Optional: run 'snap connect redisinsight:password-manager-service' for encrypted credential storage."
+    fi
+}
+run_step "14. RedisInsight" install_redisinsight
 
 # =============================================================================
 # 15. GitHub CLI (gh)
 # =============================================================================
-step_header "Installing GitHub CLI (gh)"
-if command -v gh &>/dev/null; then
-    success "GitHub CLI is already installed ($(gh --version | head -1))"
-else
-    info "Adding GitHub CLI repository..."
-    sudo mkdir -p -m 755 /etc/apt/keyrings
-    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
-    sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        | sudo tee /etc/apt/sources.list.d/github-cli-stable.list > /dev/null
-    sudo apt-get update -y
-    sudo apt-get install -y gh
-    success "GitHub CLI installed ($(gh --version | head -1))"
-    info "Run 'gh auth login' to authenticate."
-fi
+install_gh() {
+    if command -v gh &>/dev/null; then
+        success "GitHub CLI is already installed ($(gh --version | head -1))"
+    else
+        info "Adding GitHub CLI repository..."
+        sudo mkdir -p -m 755 /etc/apt/keyrings
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | sudo tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null
+        sudo chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            | sudo tee /etc/apt/sources.list.d/github-cli-stable.list > /dev/null
+        sudo apt-get update -y
+        sudo apt-get install -y gh
+        success "GitHub CLI installed ($(gh --version | head -1))"
+        info "Run 'gh auth login' to authenticate."
+    fi
+}
+run_step "15. GitHub CLI (gh)" install_gh
 
 # =============================================================================
 # 16. jq
 # =============================================================================
-step_header "Installing jq"
-if command -v jq &>/dev/null; then
-    success "jq is already installed ($(jq --version))"
-else
-    sudo apt-get install -y jq
-    success "jq installed"
-fi
+install_jq() {
+    if command -v jq &>/dev/null; then
+        success "jq is already installed ($(jq --version))"
+    else
+        sudo apt-get install -y jq
+        success "jq installed"
+    fi
+}
+run_step "16. jq" install_jq
+
+# =============================================================================
+# 17. Terminator (terminal emulator)
+# =============================================================================
+install_terminator() {
+    if ! command -v terminator &>/dev/null; then
+        sudo apt-get install -y terminator
+        success "Terminator installed"
+    else
+        success "Terminator is already installed"
+    fi
+
+    # Write config (Dracula theme + ZSH + MesloLGS NF for Powerlevel10k)
+    local config_dir="$ORIGINAL_HOME/.config/terminator"
+    mkdir -p "$config_dir"
+
+    local zsh_path
+    zsh_path="$(command -v zsh 2>/dev/null || echo '/usr/bin/zsh')"
+
+    cat > "$config_dir/config" << EOF
+[global_config]
+  title_font = MesloLGS NF 11
+
+[keybindings]
+
+[profiles]
+  [[default]]
+    background_color = "#282a36"
+    cursor_color = "#f8f8f2"
+    font = MesloLGS NF 12
+    foreground_color = "#f8f8f2"
+    show_titlebar = False
+    scrollback_lines = 5000
+    custom_command = $zsh_path
+    use_custom_command = True
+    use_system_font = False
+    palette = "#21222c:#ff5555:#50fa7b:#f1fa8c:#bd93f9:#ff79c6:#8be9fd:#f8f8f2:#6272a4:#ff6e6e:#69ff94:#ffffa5:#d6acff:#ff92df:#a4ffff:#ffffff"
+
+[layouts]
+  [[default]]
+    [[[child1]]]
+      parent = window0
+      type = Terminal
+    [[[window0]]]
+      parent = ""
+      type = Window
+
+[plugins]
+EOF
+
+    success "Terminator configured with ZSH + Dracula theme + MesloLGS NF font"
+
+    # Set Terminator as the default terminal emulator
+    if update-alternatives --list x-terminal-emulator 2>/dev/null | grep -q terminator; then
+        sudo update-alternatives --set x-terminal-emulator /usr/bin/terminator
+        success "Terminator set as default terminal emulator"
+    else
+        warn "Could not set Terminator as default via update-alternatives — set it manually in System Settings."
+    fi
+}
+run_step "17. Terminator" install_terminator
 
 # =============================================================================
 # Change default shell to zsh
 # =============================================================================
-step_header "Setting zsh as default shell"
-if [[ "$SHELL" == *"zsh"* ]]; then
-    success "zsh is already the default shell"
-else
-    chsh -s "$(which zsh)"
-    success "Default shell changed to zsh (takes effect on next login)"
-fi
+set_default_shell() {
+    if [[ "$SHELL" == *"zsh"* ]]; then
+        success "zsh is already the default shell"
+    else
+        chsh -s "$(which zsh)"
+        success "Default shell changed to zsh (takes effect on next login)"
+    fi
+}
+run_step "Set zsh as default shell" set_default_shell
 
 # =============================================================================
 # Summary
@@ -432,6 +539,15 @@ echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━
 echo -e "${GREEN}  Setup complete!${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
+
+if [[ ${#FAILED_STEPS[@]} -gt 0 ]]; then
+    warn "The following steps encountered errors and were skipped:"
+    for s in "${FAILED_STEPS[@]}"; do
+        warn "  - $s"
+    done
+    echo ""
+fi
+
 echo "Post-install actions:"
 echo "  1. Log out and back in for shell and Docker group changes."
 echo "  2. Install a Nerd Font for Powerlevel10k (MesloLGS NF recommended)."
