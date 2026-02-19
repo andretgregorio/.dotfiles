@@ -21,6 +21,8 @@
 #   - GitHub CLI (gh)
 #   - jq
 #   - Terminator (terminal emulator, configured with ZSH + Powerlevel10k)
+#   - git (identity, GPG signing key, aliases & settings)
+#   - Postman (via Snap)
 # =============================================================================
 
 set -uo pipefail
@@ -113,11 +115,24 @@ run_step "1. zsh" install_zsh
 # 2. Oh My Zsh
 # =============================================================================
 install_ohmyzsh() {
-    if [[ -d "$ORIGINAL_HOME/.oh-my-zsh" ]]; then
+    if [[ -f "$ORIGINAL_HOME/.oh-my-zsh/oh-my-zsh.sh" ]]; then
         success "Oh My Zsh is already installed"
     else
+        # A directory may exist from a partial install — preserve custom content and clear it
+        if [[ -d "$ORIGINAL_HOME/.oh-my-zsh" ]]; then
+            warn "Incomplete Oh My Zsh directory found — clearing it before reinstalling..."
+            if [[ -d "$ORIGINAL_HOME/.oh-my-zsh/custom" ]]; then
+                mv "$ORIGINAL_HOME/.oh-my-zsh/custom" /tmp/ohmyzsh-custom-backup
+            fi
+            rm -rf "$ORIGINAL_HOME/.oh-my-zsh"
+        fi
         # Unattended install, don't switch shell yet
         RUNZSH=no CHSH=no sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+        # Restore any custom content (e.g. themes) that existed before
+        if [[ -d /tmp/ohmyzsh-custom-backup ]]; then
+            cp -r /tmp/ohmyzsh-custom-backup/. "$ORIGINAL_HOME/.oh-my-zsh/custom/"
+            rm -rf /tmp/ohmyzsh-custom-backup
+        fi
         success "Oh My Zsh installed"
     fi
 }
@@ -180,6 +195,16 @@ ZSHEOF
     if ! grep -q '\.local/bin' "$zshrc"; then
         echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$zshrc"
         success "~/.local/bin added to PATH in .zshrc"
+    fi
+
+    # Add p10k config sourcing if not already present
+    if ! grep -q 'p10k.zsh' "$zshrc"; then
+        cat >> "$zshrc" << 'ZSHEOF'
+
+# To customize the prompt, run `p10k configure` or edit ~/.p10k.zsh.
+[[ ! -f ~/.p10k.zsh ]] || source ~/.p10k.zsh
+ZSHEOF
+        success "p10k sourcing added to .zshrc"
     fi
 
     success "ZSH configured"
@@ -519,6 +544,150 @@ EOF
 run_step "17. Terminator" install_terminator
 
 # =============================================================================
+# 18. Configure git (identity, GPG signing key, aliases & settings)
+# =============================================================================
+configure_git() {
+    # Ensure gnupg is available
+    if ! command -v gpg &>/dev/null; then
+        sudo apt-get install -y gnupg
+    fi
+
+    # --- Identity ---
+    local GIT_EMAIL GIT_NAME
+    GIT_EMAIL=$(git config --global user.email 2>/dev/null || true)
+    GIT_NAME=$(git config --global user.name  2>/dev/null || true)
+
+    if [[ -n "$GIT_EMAIL" ]]; then
+        success "Git email already configured: $GIT_EMAIL"
+    else
+        echo ""
+        read -rp "$(echo -e "${CYAN}[INPUT]${NC} Enter your git email: ")" GIT_EMAIL
+        if [[ -z "$GIT_EMAIL" ]]; then
+            fail "Git email is required."
+            return 1
+        fi
+        git config --global user.email "$GIT_EMAIL"
+        success "Git email set: $GIT_EMAIL"
+    fi
+
+    if [[ -n "$GIT_NAME" ]]; then
+        success "Git name already configured: $GIT_NAME"
+    else
+        read -rp "$(echo -e "${CYAN}[INPUT]${NC} Enter your git name:  ")" GIT_NAME
+        if [[ -z "$GIT_NAME" ]]; then
+            fail "Git name is required."
+            return 1
+        fi
+        git config --global user.name "$GIT_NAME"
+        success "Git name set: $GIT_NAME"
+    fi
+
+    # --- GPG signing key ---
+    local GPG_KEY_ID=""
+    local EXISTING_KEY
+    EXISTING_KEY=$(git config --global user.signingkey 2>/dev/null || true)
+
+    if [[ -n "$EXISTING_KEY" ]] && gpg --list-secret-keys "$EXISTING_KEY" &>/dev/null 2>&1; then
+        success "GPG signing key already configured: $EXISTING_KEY"
+        GPG_KEY_ID="$EXISTING_KEY"
+    elif gpg --list-secret-keys --keyid-format=long "$GIT_EMAIL" 2>/dev/null | grep -q 'sec'; then
+        success "GPG key already exists for $GIT_EMAIL"
+        GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format=long "$GIT_EMAIL" 2>/dev/null \
+            | grep 'sec' | head -1 | awk '{print $2}' | cut -d'/' -f2)
+        git config --global user.signingkey "$GPG_KEY_ID"
+        success "Git signing key set: $GPG_KEY_ID"
+    else
+        info "Generating RSA 4096 GPG key for $GIT_NAME <$GIT_EMAIL> (no passphrase)..."
+        gpg --batch --gen-key <<GPGEOF
+%no-protection
+Key-Type: RSA
+Key-Length: 4096
+Subkey-Type: RSA
+Subkey-Length: 4096
+Name-Real: $GIT_NAME
+Name-Email: $GIT_EMAIL
+Expire-Date: 0
+%commit
+GPGEOF
+        success "GPG key generated"
+        GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format=long "$GIT_EMAIL" 2>/dev/null \
+            | grep 'sec' | head -1 | awk '{print $2}' | cut -d'/' -f2)
+        git config --global user.signingkey "$GPG_KEY_ID"
+        success "Git signing key set: $GPG_KEY_ID"
+        echo ""
+        info "Copy this GPG public key and add it to GitHub / GitLab (Settings → SSH and GPG keys):"
+        echo ""
+        gpg --armor --export "$GPG_KEY_ID"
+        echo ""
+    fi
+
+    if [[ -z "$GPG_KEY_ID" ]]; then
+        warn "Could not determine GPG key ID. Set it manually: git config --global user.signingkey <KEY_ID>"
+    fi
+
+    # --- Aliases ---
+    git config --global alias.logpretty "log --graph --decorate --pretty=oneline --abbrev-commit"
+    git config --global alias.ci        "commit"
+    git config --global alias.br        "branch"
+    git config --global alias.co        "checkout"
+    git config --global alias.d         "difftool"
+    git config --global alias.df        "diff"
+    git config --global alias.lg        "log --all --graph --pretty=format:'%Cred%h%Creset -%C(yellow)%d%Creset %s %Cgreen(%cr) %C(bold blue)<%an>%Creset' --abbrev-commit --date=relative"
+    git config --global alias.st        "status"
+    git config --global alias.who       "shortlog -s -n --"
+    git config --global alias.up        "!git fetch origin && git pull --rebase origin main"
+    git config --global alias.ir        "!git pull --rebase origin main"
+    git config --global alias.cm        "!git checkout main"
+    git config --global alias.dlb       "!git checkout main && git branch | grep - --sort=committerdate refs/heads/ --format='%(HEAD) %(color:yellow)%(refname:short)%(color:reset) - %(color:red)%(objectname:short)%(color:reset) - %(contents:subject) - %(authorname) (%(color:green)%(committerdate:relative)%(color:reset))'"
+    git config --global alias.upush     "!git fetch origin && git pull --rebase origin main && git push"
+
+    # --- Color ---
+    git config --global color.branch      auto
+    git config --global color.diff        auto
+    git config --global color.interactive auto
+    git config --global color.status      auto
+    git config --global color.ui          true
+
+    # --- Core ---
+    git config --global core.editor       vim
+    git config --global core.excludesfile "$HOME/.gitignore_global"
+
+    # --- Commit ---
+    git config --global commit.gpgsign true
+
+    # --- Diff / DiffTool ---
+    git config --global diff.tool       vimdiff
+    git config --global difftool.prompt false
+
+    # --- Merge ---
+    git config --global merge.tool vimdiff
+
+    # --- Push ---
+    git config --global push.default current
+
+    # --- Git LFS ---
+    git config --global filter.lfs.clean    "git-lfs clean %f"
+    git config --global filter.lfs.smudge   "git-lfs smudge %f"
+    git config --global filter.lfs.required true
+
+    success "Git aliases and configuration applied"
+}
+run_step "18. Configure git" configure_git
+
+# =============================================================================
+# 19. Postman (via Snap)
+# =============================================================================
+install_postman() {
+    if snap list postman &>/dev/null 2>&1; then
+        success "Postman is already installed"
+    else
+        sudo snap install postman
+        success "Postman installed"
+    fi
+}
+run_step "19. Postman" install_postman
+
+# =============================================================================
 # Change default shell to zsh
 # =============================================================================
 set_default_shell() {
@@ -555,4 +724,6 @@ echo "  3. Run 'p10k configure' to set up Powerlevel10k."
 echo "  4. Run 'claude' to authenticate Claude Code CLI."
 echo "  5. Run 'gh auth login' to authenticate GitHub CLI."
 echo "  6. Run 'nvm install --lts' if Node.js was not installed during this session."
+echo "  7. Add your GPG public key (printed above) to GitHub / GitLab."
+echo "     Re-print it anytime: gpg --armor --export <KEY_ID>"
 echo ""
