@@ -3,7 +3,7 @@
 # Dev Environment Setup Script for Ubuntu 24.04
 # =============================================================================
 # This script installs and configures a complete development environment.
-# Run with: chmod +x setup-dev-env.sh && ./setup-dev-env.sh
+# Run with: chmod +x setup.sh && ./setup.sh
 #
 # Tools installed:
 #   - zsh + Oh My Zsh + Powerlevel10k
@@ -64,6 +64,17 @@ sudo apt-get upgrade -y
 success "System packages updated"
 
 # =============================================================================
+# 0. curl (required by many subsequent install steps)
+# =============================================================================
+step_header "Installing curl"
+if command -v curl &>/dev/null; then
+    success "curl is already installed"
+else
+    sudo apt-get install -y curl
+    success "curl installed"
+fi
+
+# =============================================================================
 # 1. zsh
 # =============================================================================
 step_header "Installing zsh"
@@ -118,7 +129,9 @@ else
 fi
 
 # Load nvm for this session
+# nvm.sh uses variables that may be unset, so we must disable nounset temporarily
 export NVM_DIR="$ORIGINAL_HOME/.nvm"
+set +u
 # shellcheck disable=SC1091
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 
@@ -133,6 +146,7 @@ else
     warn "nvm loaded but 'nvm' command not available in this session."
     warn "After the script finishes, open a new terminal and run: nvm install --lts"
 fi
+set -u
 
 # =============================================================================
 # 5. Docker (Docker Engine + Compose plugin)
